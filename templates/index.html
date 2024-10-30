@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+    <script src="/static/jquery-3.7.1.js" crossorigin="anonymous"></script>
+    <title>Feed Replicator Prototype</title>
+</head>
+
+<body>
+    <script type='text/javascript'>
+        $.fn.serializeObject = function () {
+            var o = {};
+            var a = this.serializeArray();
+            $.each(a, function () {
+                if (o[this.name]) {
+                    if (!o[this.name].push) {
+                        o[this.name] = [o[this.name]];
+                    }
+                    o[this.name].push(this.value || '');
+                } else {
+                    o[this.name] = this.value || '';
+                }
+            });
+            return o;
+        };
+        function tryParseDateFromString(dateStringCandidateValue, format = "ymd") {
+            const candidate = (dateStringCandidateValue || ``)
+                .split(/[ :\-\/T]/g).map(Number).filter(v => !isNaN(v));
+            const toDate = () => {
+                format = [...format].reduce((acc, val, i) => ({ ...acc, [val]: i }), {});
+                const parts = [candidate[format.y], candidate[format.m] - 1, candidate[format.d]].concat(candidate.length > 3 ? candidate.slice(3) : []);
+                d = new Date(...parts);
+                if (d.getDate && ![d.getFullYear(), d.getMonth(), d.getDate()].find((v, i) => v !== parts[i]) && d) {
+                    return d;
+                } else {
+                    return undefined
+                };
+            };
+
+            return candidate.length < 3 ? undefined : toDate();
+        }
+
+        function toTitleCase(string) {
+            return string.replace(/_/g, ' ').replace(
+                /\w\S*/g,
+                text => text.charAt(0).toUpperCase() + text.substring(1).toLowerCase()
+            );
+        }
+    </script>
+    <script type='text/javascript'>
+        $(document).ready(function () {
+            $("#posts_loading").hide();
+            $("#posts_spinner").hide();
+            $("#posts_text").hide();
+            $("#news_loading").hide();
+            $("#news_spinner").hide();
+            $("#news_text").hide();
+
+            $.getJSON("/api/options", function (data) {
+                $.each(data, function (select, options) {
+                    var select = $("#" + select);
+                    $.each(options, function (idx, choice) {
+                        select.append($("<option />").val(choice.value).text(choice.text));
+                    });
+                });
+                $("#news_filter").find("select[id=locale]").val('us');
+                $("#news_filter").find("select[id=language]").val('en');
+                $("#news_filter").find("#page").val(1)
+                $("#news_filter").submit();
+            });
+
+            $("#news_filter").on("submit", function (event) {
+                event.preventDefault();
+                var form = $(this);
+                form.find("button").attr("disabled", true);
+                $.ajax({
+                    type: form.attr('method'),
+                    url: form.attr('action'),
+                    data: form.serialize(),
+                    beforeSend: function () {
+                        $("#news_feed thead tr").empty();
+                        $("#news_feed tbody").empty();
+                        $("#news_loading").show();
+                        $("#news_spinner").show();
+                        $("#news_text").show();
+                    },
+                    success: function (data) {
+                        $("#news_loading").hide();
+                        $("#news_spinner").hide();
+                        $("#news_text").hide();
+                        $.each(data.n_filter, function (key, value) {
+                            var elem = $("#" + key);
+                            if (elem.length != 0 && value !== undefined) {
+                                if (typeof value == "boolean") {
+                                    value = value ? '1' : '0';
+                                }
+                                if (value.length != 0) {
+                                    elem.val(value);
+                                } else { elem.val('1'); }
+                            }
+
+                        });
+                        var allow_headers = ["title", "description", "published_at", "categories"];
+                        var headers = Object.keys(data.news[0]).filter((item) => allow_headers.includes(item));
+                        $.each(headers, function (idx, header) {
+                            $('#news_feed thead tr').append($('<th/>').attr("scope", "col").text(toTitleCase(header)));
+                        });
+                        $.each(data.news, function (idx, article) {
+                            var row = $('<tr/>');
+                            $.each(headers, function (idx, header) {
+                                var cell = $('<td/>').attr('scope', 'row');
+                                if (header === 'title') {
+                                    cell.append($('<a/>').attr('href', article.url).text(article.title));
+                                } else if (header === 'published_at') {
+                                    try {
+                                        cell.text(tryParseDateFromString(article[header]).toLocaleString());
+                                    } catch (error) {
+                                        cell.text(article[header].split('T')[0]);
+                                    }
+                                } else {
+                                    cell.text(article[header]);
+                                }
+                                row.append(cell)
+                            });
+                            $('#news_feed tbody').append(row);
+                        });
+                    }
+                }).done(() => { $("#news_filter").find("button").attr("disabled", false); });
+                return false;
+            });
+
+            $("#generate").on("submit", function (event) {
+                event.preventDefault();
+                var form = $(this);
+                $('#post_list').empty().hide();
+                form.find("button").attr("disabled", true);
+                $("#posts_loading").show();
+                $("#posts_spinner").show();
+                $("#posts_text").html('Loading ...').show();
+
+                fetch(form.attr("action"), {
+                    headers: { "Content-Type": "application/json" },
+                    method: form.attr("method"),
+                    body: JSON.stringify(form.serializeObject())
+                }).then(response => {
+                    console.log("response", response);
+                    const stream = response.body;
+                    const reader = stream.getReader();
+                    var idx = 0;
+                    const readChunk = () => {
+                        reader.read()
+                            .then(({
+                                value,
+                                done
+                            }) => {
+                                if (done) {
+                                    console.log('Stream finished');
+                                    $("#posts_loading").hide();
+                                    $("#posts_spinner").hide();
+                                    $("#posts_text").hide();
+                                    $('#generate').find("button").attr("disabled", false);
+                                    return;
+                                }
+
+                                $.each(new TextDecoder().decode(value).split('}{'), (_, msg) => {
+                                    brak = msg.at(0) == '{' ? '' : '{';
+                                    brak_end = msg.at(-1) == '}' ? '' : '}';
+                                    const chunkmsg = JSON.parse(brak + msg + brak_end);
+                                    console.log(chunkmsg.event);
+                                    if (chunkmsg.event == 'post_created') {
+                                        $("#posts_text").html('Creating Posts ...');
+                                        const post = JSON.parse(chunkmsg.data.post);
+                                        console.log(post)
+                                        const style = post.style.toString();
+                                        $('#post_list').append(`<div class="accordion-item">
+                                            <h2 class="accordion-header">
+                                                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                                    data-bs-target="#post_${idx}" aria-expanded="true"
+                                                    aria-controls="post_${idx}">${ style }</button>
+                                            </h2>
+                                            <div id="post_${idx}" class="accordion-collapse collapse"
+                                                aria-labelledby="posts_header" data-bs-parent="#posts_list">
+                                                <div class="accordion-body">
+                                                    ${post.text}
+                                                </div>
+                                            </div>
+                                        </div>`);
+                                        $('#post_list').show();
+                                        idx += 1;
+                                    } else {
+                                        $("#posts_text").html(toTitleCase(chunkmsg.event) + ' ...');
+                                    }
+                                });
+
+                                readChunk();
+                            })
+                            .catch(error => {
+                                // Log the error
+                                $("#posts_spinner").hide();
+                                $("#posts_text").html('Sorry! Something went wrong, try again! :(');
+                                $('#generate').find("button").attr("disabled", false);
+                                console.log(error);
+                            });
+                    };
+                    try {
+                        readChunk();
+                    } catch (error) {
+                        $("#posts_text").html('Sorry! Something went wrong, retrying... :(');
+                        console.log(error);
+                    }
+                }).catch(error => {
+                    $("#posts_spinner").hide();
+                    $("#posts_text").html('Sorry! encountered an error, try again!').show();
+                    $('#generate').find("button").attr("disabled", false);
+                    console.log(error);
+                });
+            });
+        });
+    </script>
+    <div class="container-fluid p-4 m-auto">
+        <div class="row justify-content-start align-items-center mb-3">
+            <div class="col-sm-6 col-md-2">
+                <img src="/static/logo.jpg" class="img-fluid rounded-top float-left" style="width: 65%"
+                    alt="Flixa Studios" />
+            </div>
+            <div class="col-sm-6 col-md-3">
+                <h3>Social Media Post Generator</h3>
+            </div>
+        </div>
+        <div class="row justify-content-start align-items-start g-3 mt-2">
+            <div class="col-sm-12 col-md-6" name="newsload">
+                <div class="row justify-content-center align-items-center g-2">
+                    <div class="col-12">
+                        <form method="get" action="/api/feed" id="news_filter">
+                            <div class="row justify-content-center align-items-center mb-3">
+                                <div class="col-8">
+                                    <div class="row">
+                                        <div class="col-4">
+                                            <label class="form-label" for="top_news">Top News</label>
+                                            <select class="form-select form-select-lg" name="top" id="top">
+                                                <option value=1 selected>Yes</option>
+                                                <option value=0 selected>No
+                                                </option>
+                                            </select>
+                                        </div>
+                                        <div class="col">
+                                            <label class="form-label" for="date_control">(WIP) Published On</label>
+                                            <select class="form-select form-select-lg" name="date_control"
+                                                id="date_control">
+                                                <option value="range" selected>Date Range</option>
+                                                <option value="single">Single Date</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-3">
+                                            <label for="" class="form-label">Page</label>
+                                            <input type="number" class="form-control" name="page" id="page" />
+                                        </div>
+                                    </div>
+                                    <div class="row mt-3 justify-content-center align-items-end">
+                                        <div class="col-4">
+                                            <label for="" class="form-label">Language</label>
+                                            <select class="form-select form-select-lg" name="language" id="language">
+                                                <option selected value="1">All</option>
+                                            </select>
+                                        </div>
+                                        <div class="col">
+                                            <label for="" class="form-label">Locale</label>
+                                            <select class="form-select form-select-lg" name="locale" id="locale">
+                                                <option selected value="1">All</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-3">
+                                            <button type="submit" class="btn btn-primary mb-1">Reload Articles</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <label for="" class="form-label">Categories</label>
+                                    <select multiple class="form-select form-select-lg" name="categories"
+                                        id="categories">
+                                        <option selected value="1">All</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="col-12">
+                        <div class="table-responsive">
+                            <table class="table table-light table-hover" id="news_feed">
+                                <thead>
+                                    <tr id="news_header">
+                                    </tr>
+                                </thead>
+                                <tbody id="news">
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="row justify-content-center align-items-start g-2 my-3" style="display: none;"
+                            id="news_loading">
+                            <div class="col-3 text-center">
+                                <div class="spinner-grow m-auto" role="status"
+                                    style="width: 5rem; height: 5rem; display: none;" id="news_spinner">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <div class="h4 m-auto" style="display: none;" id="news_text">Loading News ...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-sm-12 col-md-6" name="postsload">
+                <div class="row justify-content-center align-items-center g-2">
+                    <div class="col-12">
+                        <form method="post" action="/api/generate" id="generate">
+                            <div class="row justify-content-start align-items-end g-3">
+                                <div class="col-12">
+                                    <div class="accordion accordion-flush" id="gen_options_acc">
+                                        <div class="accordion-item">
+                                            <h2 class="accordion-header">
+                                                <button class="accordion-button collapsed" type="button"
+                                                    data-bs-toggle="collapse" data-bs-target="#gen_options"
+                                                    aria-expanded="true" aria-controls="gen_options">Generation
+                                                    Options</button>
+                                            </h2>
+                                            <div id="gen_options" class="accordion-collapse collapse"
+                                                aria-labelledby="gen_options_header" data-bs-parent="#gen_options_acc">
+                                                <div class="accordion-body">
+                                                    <div class="row justify-content-start align-items-start g-2"
+                                                        id="gen_options_list">
+                                                        <div class="col-3">
+                                                            <label for="" class="form-label">Audience</label>
+                                                            <select class="form-select form-select-lg" name="audience"
+                                                                id="audience">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-4">
+                                                            <label for="" class="form-label">Position</label>
+                                                            <select class="form-select form-select-lg" name="position"
+                                                                id="position">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-3">
+                                                            <label for="" class="form-label">Tone</label>
+                                                            <select class="form-select form-select-lg" name="tone"
+                                                                id="tone">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-3">
+                                                            <label for="" class="form-label">Voice</label>
+                                                            <select class="form-select form-select-lg" name="voice"
+                                                                id="voice">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-2">
+                                                            <label for="" class="form-label">Purpose</label>
+                                                            <select class="form-select form-select-lg" name="purpose"
+                                                                id="purpose">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-2">
+                                                            <label for="" class="form-label">Length</label>
+                                                            <select class="form-select form-select-lg"
+                                                                name="length_preference" id="length_preference">
+                                                                <option value="">Select one or let the bot choose
+                                                                </option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row mt-3 justify-content-start align-items-end">
+                                <div class="col-2">
+                                    <label for="" class="form-label">Article</label>
+                                    <select class="form-select form-select-lg" name="article">
+                                        <option value=0>1</option>
+                                        <option value=1>2</option>
+                                        <option value=2>3</option>
+                                    </select>
+                                </div>
+                                <div class="col-3">
+                                    <label for="" class="form-label">Platform</label>
+                                    <select class="form-select form-select-lg" name="platform">
+                                        <option value="generic">Generic</option>
+                                        <option value="x">X (formerly twitter)</option>
+                                        <option value="instagram">Instagram</option>
+                                        <option value="facebook">Facebook</option>
+                                    </select>
+                                </div>
+                                <div class="col-1"><button type="submit" class="btn btn-primary mb-1">Generate</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="col-12">
+                        <div class="row justify-content-center align-items-start g-2">
+                            <div class="col">
+                                <div class="accordion accordion-flush" style="display: none;" id="post_list">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row justify-content-center align-items-start g-2 my-3" style="display: none;"
+                            id="posts_loading">
+                            <div class="col-3 text-center">
+                                <div class="spinner-grow m-auto" role="status"
+                                    style="width: 5rem; height: 5rem; display: none;" id="posts_spinner">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <div class="h4 m-auto" style="display: none;" id="posts_text">Loading Posts ...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
